@@ -45,7 +45,7 @@ def send_all_files(target_ips, target_port, save_dir):
 
 if __name__ == "__main__":
     # 多个目标IP
-    target_ips = ['10.192.100.103']  # 这里填写你的目标IP列表
+    target_ips = ['127.0.0.1']  # 这里填写你的目标IP列表
     target_port = 6600
     save_dir = os.path.abspath('.')
     send_all_files(target_ips, target_port, save_dir)
