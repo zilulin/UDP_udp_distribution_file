@@ -2,185 +2,208 @@ import socket
 import os
 import struct
 import time
-from pathlib import Path  # 用于便捷处理路径
+import logging
+from pathlib import Path
 
-# 定义分块大小（减去头部开销）
-CHUNK_SIZE = 65500  # 留出空间给UDP头部
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('udp_transfer.log', mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def get_target_ips_from_file(file_name='ip.txt'):
     """从同文件夹的ip.txt中读取目标IP列表"""
     ips = []
     if not os.path.exists(file_name):
-        print(f"警告：未找到 {file_name} 文件，将使用空IP列表")
+        logger.warning(f"未找到 {file_name} 文件，将使用空IP列表")
         return ips
     
     try:
         with open(file_name, 'r', encoding='utf-8') as f:
             for line in f:
                 ip = line.strip()
-                if ip:  # 跳过空行
+                if ip:
                     ips.append(ip)
-        print(f"从 {file_name} 成功读取 {len(ips)} 个目标IP")
+        logger.info(f"从 {file_name} 成功读取 {len(ips)} 个目标IP")
     except Exception as e:
-        print(f"读取 {file_name} 时出错: {e}")
+        logger.error(f"读取 {file_name} 时出错: {e}")
     return ips
 
 def get_target_port_from_file(file_name='port.txt'):
     """从同文件夹的port.txt中读取端口号"""
-    default_port = 6600  # 默认端口
+    default_port = 6600
     if not os.path.exists(file_name):
-        print(f"警告：未找到 {file_name} 文件，将使用默认端口 {default_port}")
+        logger.warning(f"未找到 {file_name} 文件，将使用默认端口 {default_port}")
         return default_port
     
     try:
         with open(file_name, 'r', encoding='utf-8') as f:
             port_str = f.readline().strip()
-            if not port_str:  # 空文件
-                print(f"{file_name} 内容为空，将使用默认端口 {default_port}")
+            if not port_str:
+                logger.warning(f"{file_name} 内容为空，将使用默认端口 {default_port}")
                 return default_port
             
             port = int(port_str)
             if 1 <= port <= 65535:
-                print(f"从 {file_name} 成功读取端口: {port}")
+                logger.info(f"从 {file_name} 成功读取端口: {port}")
                 return port
             else:
-                print(f"{file_name} 中的端口号无效，将使用默认端口 {default_port}")
+                logger.warning(f"{file_name} 中的端口号无效，将使用默认端口 {default_port}")
                 return default_port
     except ValueError:
-        print(f"{file_name} 中的内容不是有效的端口号，将使用默认端口 {default_port}")
+        logger.warning(f"{file_name} 中的内容不是有效的端口号，将使用默认端口 {default_port}")
     except Exception as e:
-        print(f"读取 {file_name} 时出错: {e}，将使用默认端口 {default_port}")
+        logger.error(f"读取 {file_name} 时出错: {e}，将使用默认端口 {default_port}")
     return default_port
 
 def get_all_files_recursive(root_dir):
     """非递归方式获取目录下所有文件（包括子文件夹中的文件）"""
     all_files = []
-    # 排除的文件和文件夹（可根据需要修改）
-    excluded = {'udp_push_v4.exe', 'ip.txt', 'port.txt', os.path.basename(__file__)}
+    excluded = {'udp_push_v4.exe', 'ip.txt', 'port.txt','udp_transfer.log', os.path.basename(__file__)}
     
-    # 用栈存储待处理的目录路径（初始时压入根目录）
     stack = [root_dir]
-    
     while stack:
-        # 弹出栈顶目录进行处理
         current_dir = stack.pop()
-        
-        # 遍历当前目录下的所有条目
         for entry in os.scandir(current_dir):
-            # 跳过排除项
             if entry.name in excluded:
                 continue
-            
             if entry.is_file():
-                # 计算文件相对根目录的路径
                 rel_path = os.path.relpath(entry.path, root_dir)
                 all_files.append((entry.path, rel_path))
             elif entry.is_dir():
-                # 子文件夹压入栈，后续处理
                 stack.append(entry.path)
     
     return all_files
 
-def send_long_path(sock, addr, path_bytes):
-    """分块发送长路径（支持超过单个UDP包大小的路径）"""
-    total_len = len(path_bytes)
-    # 发送总长度（使用8字节无符号整数）
-    sock.sendto(struct.pack('!Q', total_len), addr)
-    
-    # 分块发送路径数据
-    chunks_sent = 0
-    for i in range(0, total_len, CHUNK_SIZE):
-        chunk = path_bytes[i:i+CHUNK_SIZE]
-        # 发送块序号和块数据
-        chunk_header = struct.pack('!I', chunks_sent)
-        sock.sendto(chunk_header + chunk, addr)
-        chunks_sent += 1
-        # 短暂延时，避免网络拥塞
-        time.sleep(0.001)
-    
-    # 发送结束标记（使用无符号整数最大值表示结束）
-    sock.sendto(struct.pack('!I', 0xFFFFFFFF), addr)  # 修改这里
-    return chunks_sent
+def wait_for_ack(client_socket, expected_ack, timeout=5):
+    """等待接收端的ACK消息"""
+    client_socket.settimeout(timeout)
+    try:
+        data, addr = client_socket.recvfrom(1024)
+        received_ack = data.decode('utf-8')
+        if received_ack.startswith(expected_ack):
+            logger.info(f"收到ACK: {received_ack} 从 {addr}")
+            return True
+        else:
+            logger.warning(f"收到意外的ACK: {received_ack}，期望: {expected_ack}")
+            return False
+    except socket.timeout:
+        logger.warning(f"等待 {expected_ack} 超时")
+        return False
+    except Exception as e:
+        logger.error(f"等待ACK时出错: {e}")
+        return False
+    finally:
+        client_socket.settimeout(None)
 
 def send_all_files(save_dir):
-    # 从文件获取配置
     target_ips = get_target_ips_from_file()
     target_port = get_target_port_from_file()
     
     if not target_ips:
-        print("没有可用的目标IP，无法发送文件")
+        logger.error("没有可用的目标IP，无法发送文件")
         return
 
-    # 获取当前目录下所有文件（包括子文件夹）
-    root_dir = os.getcwd()  # 程序所在目录
+    root_dir = os.getcwd()
     all_files = get_all_files_recursive(root_dir)
     
     if not all_files:
-        print("未找到可发送的文件（包括子文件夹）")
+        logger.warning("未找到可发送的文件（包括子文件夹）")
         return
-    print(f"共发现 {len(all_files)} 个可发送文件（包括子文件夹）")
+    logger.info(f"共发现 {len(all_files)} 个可发送文件（包括子文件夹）")
 
     for target_ip in target_ips:
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = (target_ip, target_port)
 
-        # 1. 发送保存根目录（使用分块发送）
-        dir_bytes = save_dir.encode('utf-8')
-        print(f"[{target_ip}:{target_port}] 开始发送保存根目录（{len(dir_bytes)} 字节）")
-        chunks = send_long_path(client_socket, addr, dir_bytes)
-        print(f"[{target_ip}:{target_port}] 保存根目录发送完成，共 {chunks} 块")
-
-        # 2. 发送文件总数（用于接收端确认）
-        file_count = len(all_files)
-        client_socket.sendto(struct.pack('!I', file_count), addr)
-        print(f"[{target_ip}:{target_port}] 已发送文件总数: {file_count}")
-
-        # 3. 逐个发送文件
-        for file_path, rel_path in all_files:
-            try:
-                file_size = os.path.getsize(file_path)
-                # 发送文件相对路径（使用分块发送）
-                rel_path_bytes = rel_path.encode('utf-8')
-                print(f"[{target_ip}:{target_port}] 开始发送文件头: {rel_path}（{file_size} 字节）")
-                
-                # 先发送文件大小
-                client_socket.sendto(struct.pack('!Q', file_size), addr)
-                
-                # 再发送文件路径
-                path_chunks = send_long_path(client_socket, addr, rel_path_bytes)
-                print(f"[{target_ip}:{target_port}] 文件路径发送完成，共 {path_chunks} 块")
-
-                # 发送文件内容
-                with open(file_path, 'rb') as f:
-                    bytes_sent = 0
-                    chunks_sent = 0
-                    while bytes_sent < file_size:
-                        data = f.read(CHUNK_SIZE)
-                        if not data:
-                            break
-                        # 发送块序号和数据
-                        chunk_header = struct.pack('!I', chunks_sent)
-                        client_socket.sendto(chunk_header + data, addr)
-                        bytes_sent += len(data)
-                        chunks_sent += 1
-                        # 每100个块短暂延时，避免网络拥塞
-                        if chunks_sent % 100 == 0:
-                            time.sleep(0.01)
-                
-                print(f"[{target_ip}:{target_port}] 发送完成: {rel_path}（{chunks_sent} 个数据块）")
-                # 文件间间隔，避免拥塞
-                time.sleep(0.05)
-
-            except Exception as e:
-                print(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
+        try:
+            # 1. 发送保存根目录并等待ACK
+            dir_bytes = save_dir.encode('utf-8')
+            dir_header = struct.pack('!I', len(dir_bytes)) + dir_bytes
+            client_socket.sendto(dir_header, addr)
+            logger.info(f"[{target_ip}:{target_port}] 已发送保存根目录: {save_dir}")
+            if not wait_for_ack(client_socket, "DIR_ACK"):
+                logger.warning(f"[{target_ip}:{target_port}] 未收到DIR_ACK，终止发送")
+                client_socket.close()
                 continue
 
-        # 4. 发送结束信号
-        client_socket.sendto(b'end_work', addr)
-        print(f"[{target_ip}:{target_port}] 所有文件发送完毕")
-        client_socket.close()
+            # 2. 发送文件总数并等待ACK
+            file_count = len(all_files)
+            client_socket.sendto(struct.pack('!I', file_count), addr)
+            logger.info(f"[{target_ip}:{target_port}] 已发送文件总数: {file_count}")
+            if not wait_for_ack(client_socket, "COUNT_ACK"):
+                logger.warning(f"[{target_ip}:{target_port}] 未收到COUNT_ACK，终止发送")
+                client_socket.close()
+                continue
+
+            # 3. 逐个发送文件
+            for file_path, rel_path in all_files:
+                try:
+                    file_size = os.path.getsize(file_path)
+                    rel_path_bytes = rel_path.encode('utf-8')
+                    header = struct.pack('!I', len(rel_path_bytes)) + rel_path_bytes + struct.pack('!Q', file_size)
+                    client_socket.sendto(header, addr)
+                    logger.info(f"[{target_ip}:{target_port}] 开始发送: {rel_path}（{file_size} 字节）")
+                    if not wait_for_ack(client_socket, "HEADER_ACK"):
+                        logger.warning(f"[{target_ip}:{target_port}] 未收到HEADER_ACK，跳过文件 {rel_path}")
+                        continue
+
+                    # 发送文件内容
+                    bytes_sent = 0
+                    start_time = time.time()
+                    with open(file_path, 'rb') as f:
+                        while bytes_sent < file_size:
+                            data = f.read(65507)
+                            if not data:
+                                break
+                            client_socket.sendto(data, addr)
+                            expected_ack = f"DATA_ACK:{len(data)}"
+                            if not wait_for_ack(client_socket, expected_ack):
+                                logger.warning(f"[{target_ip}:{target_port}] 未收到DATA_ACK，终止文件 {rel_path}")
+                                break
+                            bytes_sent += len(data)
+                            progress = (bytes_sent / file_size) * 100
+                            elapsed = time.time() - start_time
+                            speed = bytes_sent / elapsed / 1024 if elapsed > 0 else 0
+                            # 进度打印仍使用 print 以支持动态更新
+                            print(f"\r[{target_ip}:{target_port}] 进度: {progress:.2f}%, 速度: {speed:.2f} KB/s", end='')
+                    
+                    print()  # 换行以结束进度打印
+                    logger.info(f"[{target_ip}:{target_port}] 文件内容发送完成: {rel_path}")
+                    if bytes_sent < file_size:
+                        continue
+
+                    # 等待文件完成ACK
+                    if not wait_for_ack(client_socket, "FILE_COMPLETE"):
+                        logger.warning(f"[{target_ip}:{target_port}] 未收到FILE_COMPLETE，跳过文件 {rel_path}")
+                        continue
+
+                    # 等待处理完成ACK
+                    if not wait_for_ack(client_socket, "PROCESS_COMPLETE"):
+                        logger.warning(f"[{target_ip}:{target_port}] 未收到PROCESS_COMPLETE，跳过文件 {rel_path}")
+                        continue
+
+                    logger.info(f"[{target_ip}:{target_port}] 文件传输完成: {rel_path}")
+
+                except Exception as e:
+                    logger.error(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
+                    continue
+
+            logger.info(f"[{target_ip}:{target_port}] 所有文件发送完毕")
+
+        except Exception as e:
+            logger.error(f"[{target_ip}:{target_port}] 发送过程中发生错误: {e}")
+        finally:
+            client_socket.close()
 
 if __name__ == "__main__":
     save_dir = os.path.abspath('.')
+    logger.info("开始文件传输程序")
     send_all_files(save_dir)
+    logger.info("文件传输程序结束")
     input("按回车键退出...")
