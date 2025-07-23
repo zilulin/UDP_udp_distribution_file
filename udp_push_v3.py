@@ -96,120 +96,54 @@ def send_all_files(save_dir):
         return
     print(f"共发现 {len(all_files)} 个可发送文件（包括子文件夹）")
 
-    # 配置发送参数
-    CHUNK_SIZE = 1400  # 每个数据包的大小，可根据网络情况调整
-    RETRY_COUNT = 3    # 每个数据包的最大重试次数
-    SEND_TIMEOUT = 0.5 # 发送超时时间（秒）
-    FILE_SEND_DELAY = 0.1 # 文件间发送延迟（秒）
-
     for target_ip in target_ips:
-        try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            
-            # 增大发送缓冲区
-            client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65535)
-            
-            # 设置超时
-            client_socket.settimeout(SEND_TIMEOUT)
-            addr = (target_ip, target_port)
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        addr = (target_ip, target_port)
 
-            # 1. 发送保存根目录
-            dir_bytes = save_dir.encode('utf-8')
-            dir_header = struct.pack('!I', len(dir_bytes)) + dir_bytes
-            
-            # 带重试机制的发送
-            for _ in range(RETRY_COUNT):
-                try:
-                    client_socket.sendto(dir_header, addr)
-                    print(f"[{target_ip}:{target_port}] 已发送保存根目录: {save_dir}")
-                    break
-                except socket.timeout:
-                    print(f"[{target_ip}:{target_port}] 发送根目录超时，重试中...")
-            else:
-                print(f"[{target_ip}:{target_port}] 发送根目录失败，放弃")
-                continue
+        # 1. 发送保存根目录
+        dir_bytes = save_dir.encode('utf-8')
+        dir_header = struct.pack('!I', len(dir_bytes)) + dir_bytes
+        client_socket.sendto(dir_header, addr)
+        print(f"[{target_ip}:{target_port}] 已发送保存根目录: {save_dir}")
 
-            # 2. 发送文件总数（用于接收端确认）
-            file_count = len(all_files)
-            
-            for _ in range(RETRY_COUNT):
-                try:
-                    client_socket.sendto(struct.pack('!I', file_count), addr)
-                    print(f"[{target_ip}:{target_port}] 已发送文件总数: {file_count}")
-                    break
-                except socket.timeout:
-                    print(f"[{target_ip}:{target_port}] 发送文件总数超时，重试中...")
-            else:
-                print(f"[{target_ip}:{target_port}] 发送文件总数失败，放弃")
-                continue
+        # 2. 发送文件总数（用于接收端确认）
+        file_count = len(all_files)
+        client_socket.sendto(struct.pack('!I', file_count), addr)
+        print(f"[{target_ip}:{target_port}] 已发送文件总数: {file_count}")
 
-            # 3. 逐个发送文件
-            for file_path, rel_path in all_files:
-                try:
-                    file_size = os.path.getsize(file_path)
-                    
-                    # 发送文件相对路径（用于接收端重建目录结构）
-                    rel_path_bytes = rel_path.encode('utf-8')
-                    # 构建文件头：路径长度(4字节) + 路径 + 文件大小(8字节)
-                    header = struct.pack('!I', len(rel_path_bytes)) + rel_path_bytes + struct.pack('!Q', file_size)
-                    
-                    for _ in range(RETRY_COUNT):
-                        try:
-                            client_socket.sendto(header, addr)
-                            print(f"[{target_ip}:{target_port}] 开始发送: {rel_path}（{file_size} 字节）")
+        # 3. 逐个发送文件
+        for file_path, rel_path in all_files:
+            try:
+                file_size = os.path.getsize(file_path)
+                # 发送文件相对路径（用于接收端重建目录结构）
+                rel_path_bytes = rel_path.encode('utf-8')
+                # 构建文件头：路径长度(4字节) + 路径 + 文件大小(8字节)
+                header = struct.pack('!I', len(rel_path_bytes)) + rel_path_bytes + struct.pack('!Q', file_size)
+                client_socket.sendto(header, addr)
+                print(f"[{target_ip}:{target_port}] 开始发送: {rel_path}（{file_size} 字节）")
+
+                # 发送文件内容
+                with open(file_path, 'rb') as f:
+                    bytes_sent = 0
+                    while bytes_sent < file_size:
+                        data = f.read(65507)
+                        if not data:
                             break
-                        except socket.timeout:
-                            print(f"[{target_ip}:{target_port}] 发送文件头超时，重试中...")
-                    else:
-                        print(f"[{target_ip}:{target_port}] 发送文件头失败，跳过文件")
-                        continue
+                        client_socket.sendto(data, addr)
+                        bytes_sent += len(data)
+                        #time.sleep(0.005)  # 适当延时，减少丢包
 
-                    # 发送文件内容
-                    with open(file_path, 'rb') as f:
-                        bytes_sent = 0
-                        start_time = time.time()
-                        
-                        while bytes_sent < file_size:
-                            data = f.read(CHUNK_SIZE)
-                            if not data:
-                                break
-                            
-                            # 带重试机制的发送
-                            for attempt in range(RETRY_COUNT):
-                                try:
-                                    client_socket.sendto(data, addr)
-                                    break
-                                except socket.timeout:
-                                    if attempt < RETRY_COUNT - 1:
-                                        print(f"[{target_ip}:{target_port}] 发送数据包超时，重试中...")
-                                    else:
-                                        print(f"[{target_ip}:{target_port}] 发送数据包失败，跳过")
-                            
-                            bytes_sent += len(data)
-                            
-                            # 显示进度
-                            progress = (bytes_sent / file_size) * 100
-                            elapsed = time.time() - start_time
-                            speed = bytes_sent / elapsed / 1024 if elapsed > 0 else 0
-                            print(f"\r[{target_ip}:{target_port}] 进度: {progress:.2f}%, 速度: {speed:.2f} KB/s", end='')
-                        
-                        print()  # 换行
-                    
-                    print(f"[{target_ip}:{target_port}] 发送完成: {rel_path}")
-                    time.sleep(FILE_SEND_DELAY)  # 文件间间隔，避免拥塞
+                print(f"[{target_ip}:{target_port}] 发送完成: {rel_path}")
+                #time.sleep(0.1)  # 文件间间隔，避免拥塞
 
-                except Exception as e:
-                    print(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
-                    continue
+            except Exception as e:
+                print(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
+                continue
 
-            # 4. 发送结束信号
-            #client_socket.sendto(b'end_work', addr)
-            print(f"[{target_ip}:{target_port}] 所有文件发送完毕")
-            
-        except Exception as e:
-            print(f"连接到 {target_ip}:{target_port} 失败: {e}")
-        finally:
-            client_socket.close()
+        # 4. 发送结束信号
+        #client_socket.sendto(b'end_work', addr)
+        print(f"[{target_ip}:{target_port}] 所有文件发送完毕")
+        client_socket.close()
 
 if __name__ == "__main__":
     save_dir = os.path.abspath('.')
