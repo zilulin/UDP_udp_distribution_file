@@ -4,27 +4,53 @@ import struct
 import time
 import ctypes
 import logging
+from logging.handlers import TimedRotatingFileHandler  # 导入按时间轮转的日志处理器
+import shutil
 
 def setup_logger():
-    """配置日志记录器"""
+    """配置日志记录器（按时间切割，每天一次，保留7天）"""
     logger = logging.getLogger('file_receiver')
     logger.setLevel(logging.INFO)
     
-    file_handler = logging.FileHandler('file_receiver.log', encoding='utf-8')
+    # 日志文件配置
+    log_file = 'file_receiver.log'  # 主日志文件名
+    when = 'D'  # 轮转单位：'D'=每天，'H'=每小时，'M'=每分钟（根据需求调整）
+    interval = 1  # 间隔时间（1天）
+    backup_count = 7  # 保留7天的历史日志
+    encoding = 'utf-8'  # 日志编码
+    
+    # 创建按时间轮转的文件处理器
+    file_handler = TimedRotatingFileHandler(
+        filename=log_file,
+        when=when,
+        interval=interval,
+        backupCount=backup_count,
+        encoding=encoding
+    )
+    # 设置日志文件名后缀（如 file_receiver.log.2025-07-24）
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setLevel(logging.INFO)
     
+    # 创建控制台处理器（同时输出到控制台）
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     
+    # 定义日志格式（包含时间、级别、信息）
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
     
+    # 避免日志重复输出（清除已有处理器）
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    
+    # 添加处理器到日志器
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     
     return logger
 
+# 初始化日志器
 logger = setup_logger()
 
 def hide_console():
@@ -63,6 +89,17 @@ def get_target_port_from_file(file_name='port_receive.txt'):
     except Exception as e:
         logger.error(f"读取 {file_name} 时出错: {e}，将使用默认端口 {default_port}")
     return default_port
+
+def is_file_locked(file_path):
+    """检查文件是否被其他程序锁定"""
+    if not os.path.exists(file_path):
+        return False
+    try:
+        with open(file_path, 'a'):
+            pass
+        return False
+    except IOError:
+        return True
 
 def receive_file():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -120,6 +157,10 @@ def receive_file():
 
                 if os.path.exists(save_path):
                     try:
+                        # 检查文件是否被锁定
+                        if is_file_locked(save_path):
+                            logger.warning(f"文件 {save_path} 被其他程序锁定，尝试删除...")
+                        
                         os.remove(save_path)
                         logger.info(f"已删除同名文件: {save_path}")
                     except Exception as e:
@@ -152,13 +193,31 @@ def receive_file():
                 server_socket.sendto(b"FILE_COMPLETE", client_address)
                 logger.info(f"发送文件完成确认到 {client_address}")
 
-                os.rename(temp_path, save_path)
-                logger.info(f"文件已保存至: {save_path}")
-                received_count += 1
-
+                # 文件重命名逻辑
+                try:
+                    # 再次检查目标文件是否存在
+                    if os.path.exists(save_path):
+                        if is_file_locked(save_path):
+                            logger.warning(f"文件 {save_path} 被锁定，尝试强制删除...")
+                        os.remove(save_path)
+                        logger.info(f"重命名前再次删除已存在的目标文件: {save_path}")
+                    
+                    os.rename(temp_path, save_path)
+                    logger.info(f"文件已成功保存至: {save_path}")
+                
+                except OSError as e:
+                    try:
+                        shutil.move(temp_path, save_path)
+                        logger.warning(f"os.rename 失败，使用 shutil.move 成功保存文件至: {save_path}")
+                    
+                    except Exception as e2:
+                        logger.error(f"文件重命名失败: {e2}，临时文件保留在: {temp_path}")
+                        continue
+                
                 # 发送处理完成确认
                 server_socket.sendto(b"PROCESS_COMPLETE", client_address)
                 logger.info(f"发送处理完成确认到 {client_address}")
+                received_count += 1
 
             logger.info(f"所有 {received_count}/{total_files} 个文件接收完成")
 
