@@ -60,4 +60,4 @@ def receive_file(output_dir='received_files'):
         server_socket.close()
 
 if __name__ == "__main__":
-    receive_file()    
+    receive_file(r'D:\myfiles')  

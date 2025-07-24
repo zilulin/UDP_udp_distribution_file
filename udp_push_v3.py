@@ -131,10 +131,10 @@ def send_all_files(save_dir):
                             break
                         client_socket.sendto(data, addr)
                         bytes_sent += len(data)
-                        #time.sleep(0.005)  # 适当延时，减少丢包
+                        time.sleep(0.005)  # 适当延时，减少丢包
 
                 print(f"[{target_ip}:{target_port}] 发送完成: {rel_path}")
-                #time.sleep(0.1)  # 文件间间隔，避免拥塞
+                time.sleep(0.1)  # 文件间间隔，避免拥塞
 
             except Exception as e:
                 print(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
