@@ -117,9 +117,13 @@ def send_all_files(save_dir):
         return
     logger.info(f"共发现 {len(all_files)} 个可发送文件（包括子文件夹）")
 
-    for target_ip in target_ips:
+    total_ips = len(target_ips)
+    
+    for ip_index, target_ip in enumerate(target_ips, 1):
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = (target_ip, target_port)
+
+        logger.info(f"开始给第 {ip_index}/{total_ips} 台电脑发送文件: {target_ip}")
 
         try:
             # 1. 发送保存根目录并等待ACK
@@ -142,7 +146,10 @@ def send_all_files(save_dir):
                 continue
 
             # 3. 逐个发送文件
-            for file_path, rel_path in all_files:
+            total_files = len(all_files)
+            for file_index, (file_path, rel_path) in enumerate(all_files, 1):
+                logger.info(f"开始给第 {ip_index}/{total_ips} 台电脑发送第 {file_index}/{total_files} 个文件: {rel_path}")
+                
                 try:
                     file_size = os.path.getsize(file_path)
                     rel_path_bytes = rel_path.encode('utf-8')
@@ -171,7 +178,7 @@ def send_all_files(save_dir):
                             elapsed = time.time() - start_time
                             speed = bytes_sent / elapsed / 1024 if elapsed > 0 else 0
                             # 进度打印仍使用 print 以支持动态更新
-                            print(f"\r[{target_ip}:{target_port}] 进度: {progress:.2f}%, 速度: {speed:.2f} KB/s", end='')
+                            print(f"\r第 {ip_index}/{total_ips} 台电脑发送第 {file_index}/{total_files} 个文件 [{target_ip}:{target_port}], 进度: {progress:.2f}%, 速度: {speed:.2f} KB/s", end='')
                     
                     print()  # 换行以结束进度打印
                     logger.info(f"[{target_ip}:{target_port}] 文件内容发送完成: {rel_path}")
@@ -194,7 +201,7 @@ def send_all_files(save_dir):
                     logger.error(f"[{target_ip}:{target_port}] 发送 {rel_path} 失败: {e}")
                     continue
 
-            logger.info(f"[{target_ip}:{target_port}] 所有文件发送完毕")
+            logger.info(f"第 {ip_index}/{total_ips} 台电脑 {target_ip} 所有文件发送完毕")
 
         except Exception as e:
             logger.error(f"[{target_ip}:{target_port}] 发送过程中发生错误: {e}")
@@ -206,4 +213,4 @@ if __name__ == "__main__":
     logger.info("开始文件传输程序")
     send_all_files(save_dir)
     logger.info("文件传输程序结束")
-    input("按回车键退出...")
+    input("按回车键退出...")    
