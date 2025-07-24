@@ -70,7 +70,8 @@ def receive_file():
     server_address = ('', target_port)
     server_socket.bind(server_address)
     logger.info(f"正在监听UDP端口 {server_address[1]}...")
-
+    time.sleep(5)  # 等待端口绑定稳定
+    hide_console()
     try:
         while True:
             # 1. 接收保存根目录地址
